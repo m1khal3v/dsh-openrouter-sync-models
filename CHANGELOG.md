@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-02
+
+### Changed
+
+- The release workflow skips npm publication when the package version is
+  already live, so a manual publish no longer makes a later tag run fail.
+
 ## [0.1.0] - 2026-11-02
 
 ### Added

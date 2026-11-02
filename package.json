@@ -1,6 +1,6 @@
 {
   "name": "dsh-openrouter-sync-models",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keep the DeepSeek Harness OpenRouter model list in sync with the OpenRouter catalog, including account presets",
   "license": "MIT",
   "author": "m1khal3v",
