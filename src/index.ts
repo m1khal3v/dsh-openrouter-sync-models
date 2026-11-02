@@ -10,9 +10,11 @@
  * so the same code works in the desktop app, the web surface, and the CLI
  * without knowing a profile name or a filesystem path.
  *
- * A first pass runs once the provider directory is available, then every
- * `intervalHours` hours, and immediately after the route's credential changes
- * so a different account's presets are picked up without a restart.
+ * Refresh policy is deliberately narrow. Within one host process only three
+ * triggers exist: the startup pass (including short retries while the loader
+ * settles), a change of the route's own OpenRouter credential, and the
+ * periodic pass six hours after the last completed attempt. No HMR, settings,
+ * adapter, or plugin-manager event starts a catalog request.
  *
  * @module dsh-openrouter-sync-models
  */
@@ -22,6 +24,7 @@ import type {} from '@deepseek-ai/cordis-plugin-timer'
 import type { Config as PluginConfig, ResolvedConfig } from './config.ts'
 import { resolveConfig } from './config.ts'
 import { fetchOpenRouterModels } from './openrouter.ts'
+import { writeStatus } from './status.ts'
 import { currentKeyRef, synchronize } from './sync.ts'
 import type { SyncReport, SyncTrigger } from './types.ts'
 
@@ -32,24 +35,51 @@ export { Config } from './config.ts'
 export type { Config as PluginConfig, ResolvedConfig } from './config.ts'
 export type { SyncReport, SyncStatus, SyncTrigger } from './types.ts'
 
-/** Delay between provider-directory probes during startup. */
+/** Delay between provider/settings probes during startup. */
 const PROVIDER_POLL_MS = 250
 
+/** Startup attempts after the first: settle HMR/loader races without events. */
+export const STARTUP_RETRY_DELAYS = [0, 1_000, 3_000, 10_000] as const
+
+/** Coalesce the burst of writes one credential update can emit. */
+const CREDENTIAL_DEBOUNCE_MS = 500
+
+/** Ignore duplicate credential events from the same operation. */
+const CREDENTIAL_COOLDOWN_MS = 5_000
+
+/** Whether the provider and its settings descriptor are both ready. */
+export function targetReady(ctx: Pick<Context, 'llm' | 'settings'>, config: ResolvedConfig): boolean {
+  const provider = ctx.llm.listConfigurableProviders().find(entry => entry.provider === config.provider)
+  if (provider === undefined) return false
+  return ctx.settings.describe().some(entry => String(entry.ns) === provider.settingsNs)
+}
+
 /**
- * Wait for the provider route to appear in the LLM directory. The directory is
- * populated by `dsh-llm-pi-ai` during loader settlement, which can finish
- * slightly after this plugin activates.
- * @param ctx - context carrying the LLM directory.
- * @param config - resolved plugin configuration.
- * @param signal - plugin lifetime cancellation.
- * @returns nothing; the caller checks the directory again before syncing.
+ * Wait for both halves of the target: `llm-pi-ai` registers the provider in
+ * the directory before its settings entry necessarily reaches the active
+ * state. Waiting only for the directory is what let an install-time pass skip
+ * with `settings-missing` and then sleep until the six-hour timer.
  */
-async function waitForProvider(ctx: Context, config: ResolvedConfig, signal: AbortSignal): Promise<void> {
+async function waitForTarget(ctx: Context, config: ResolvedConfig, signal: AbortSignal): Promise<boolean> {
   const deadline = Date.now() + config.startupGraceMs
-  while (!signal.aborted && Date.now() < deadline) {
-    if (ctx.llm.listConfigurableProviders().some(entry => entry.provider === config.provider)) return
+  for (;;) {
+    if (signal.aborted) return false
+    try {
+      if (targetReady(ctx, config)) return true
+    } catch {
+      // A settings reload can transiently reject; the next poll retries.
+    }
+    if (Date.now() >= deadline) return false
     await ctx.timeout(PROVIDER_POLL_MS)
   }
+}
+
+/** Whether a startup outcome is a transient ordering problem worth retrying. */
+export function shouldRetryStartup(report: SyncReport | undefined): boolean {
+  if (report?.status !== 'skipped') return false
+  return report.reason === 'provider-missing'
+    || report.reason === 'settings-missing'
+    || report.reason === 'route-missing'
 }
 
 /**
@@ -67,46 +97,130 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // credentials must still load this plugin, just without synchronization.
   ctx.inject(['llm', 'settings', 'credentials', 'timer'], (ctx) => {
     const lifetime = new AbortController()
+    const intervalMs = Math.round(resolved.intervalHours * 3_600_000)
     let running = false
+    let pendingCredential = false
+    let attempt = 0
+    let periodicDispose: (() => void) | undefined
+    let credentialDebounceDispose: (() => void) | undefined
+    let lastCredentialStartedAt = 0
 
-    const run = async (trigger: SyncTrigger): Promise<void> => {
-      if (running || lifetime.signal.aborted) return
-      running = true
+    const schedulePeriodic = (): void => {
+      if (periodicDispose !== undefined) {
+        periodicDispose()
+        periodicDispose = undefined
+      }
+      if (lifetime.signal.aborted) return
+      periodicDispose = ctx.timeout(() => {
+        periodicDispose = undefined
+        void runSync('interval')
+      }, intervalMs)
+    }
+
+    const doSync = async (trigger: SyncTrigger, attemptNo: number): Promise<SyncReport | undefined> => {
+      let report: SyncReport
       try {
-        const report: SyncReport = await synchronize({
+        report = await synchronize({
           llm: ctx.llm,
           settings: ctx.settings,
           credentials: ctx.credentials,
           fetchModels: options => fetchOpenRouterModels({ ...options, signal: lifetime.signal }),
           log,
         }, resolved, { trigger, signal: lifetime.signal })
-        if (!lifetime.signal.aborted) ctx.emit('openrouter/models-synced', report)
       } catch (error) {
         // `synchronize` contains operational failures; this guard covers a
         // programming error or a disposed service and keeps the host alive.
         log.error('unexpected synchronization failure: %s', error instanceof Error ? error.message : String(error))
+        return undefined
+      }
+
+      const withAttempt: SyncReport = { ...report, attempt: attemptNo }
+      if (!lifetime.signal.aborted) {
+        ctx.emit('openrouter/models-synced', withAttempt)
+        try {
+          await writeStatus(withAttempt)
+        } catch (error) {
+          log.warn('could not write sync status: %s', error instanceof Error ? error.message : String(error))
+        }
+      }
+      return withAttempt
+    }
+
+    /**
+     * Run one serialized synchronization. A credential change observed while
+     * a pass is running earns at most one follow-up pass; startup and interval
+     * triggers are dropped rather than queued.
+     */
+    const runSync = async (trigger: SyncTrigger, forcedAttempt?: number): Promise<SyncReport | undefined> => {
+      if (lifetime.signal.aborted) return undefined
+      if (running) {
+        if (trigger === 'credential') pendingCredential = true
+        return undefined
+      }
+
+      running = true
+      let last: SyncReport | undefined
+      let nextTrigger: SyncTrigger = trigger
+      let attemptNo = forcedAttempt ?? ++attempt
+      try {
+        for (;;) {
+          last = await doSync(nextTrigger, attemptNo)
+          if (lifetime.signal.aborted || !pendingCredential) break
+          pendingCredential = false
+          nextTrigger = 'credential'
+          attemptNo = ++attempt
+        }
       } finally {
         running = false
+        schedulePeriodic()
       }
+      return last
     }
 
     const bootstrap = async (): Promise<void> => {
-      try {
-        await waitForProvider(ctx, resolved, lifetime.signal)
-      } catch (error) {
-        log.warn('provider discovery was interrupted: %s', error instanceof Error ? error.message : String(error))
+      let first = true
+      for (const delay of STARTUP_RETRY_DELAYS) {
+        if (lifetime.signal.aborted) return
+        if (delay > 0) {
+          await ctx.timeout(delay)
+          if (lifetime.signal.aborted) return
+        }
+        if (first) {
+          first = false
+          await waitForTarget(ctx, resolved, lifetime.signal)
+          if (lifetime.signal.aborted) return
+        }
+        const report = await runSync('startup')
+        if (!shouldRetryStartup(report)) return
       }
-      await run('startup')
+    }
+
+    const requestCredentialSync = (): void => {
+      if (credentialDebounceDispose !== undefined) {
+        credentialDebounceDispose()
+        credentialDebounceDispose = undefined
+      }
+      credentialDebounceDispose = ctx.timeout(() => {
+        credentialDebounceDispose = undefined
+        if (lifetime.signal.aborted) return
+        const now = Date.now()
+        if (now - lastCredentialStartedAt < CREDENTIAL_COOLDOWN_MS) return
+        lastCredentialStartedAt = now
+        if (running) {
+          pendingCredential = true
+          return
+        }
+        void runSync('credential')
+      }, CREDENTIAL_DEBOUNCE_MS)
     }
 
     ctx.timeout(() => void bootstrap(), 0)
-    ctx.interval(() => void run('interval'), Math.round(resolved.intervalHours * 3_600_000))
 
     ctx.on('credentials/reference-updated', (ref) => {
       if (lifetime.signal.aborted) return
       try {
         const watched = currentKeyRef(ctx, resolved)
-        if (watched !== undefined && String(ref) === watched) void run('credential')
+        if (watched !== undefined && String(ref) === watched) requestCredentialSync()
       } catch (error) {
         log.warn('credential update could not be matched to the route: %s', error instanceof Error ? error.message : String(error))
       }
@@ -114,7 +228,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
     ctx.effect(() => () => {
       lifetime.abort(new Error('openrouter-sync-models disposed'))
-    }, 'openrouter-sync-models: abort in-flight catalog request')
+      if (credentialDebounceDispose !== undefined) credentialDebounceDispose()
+      if (periodicDispose !== undefined) periodicDispose()
+    }, 'openrouter-sync-models: abort in-flight catalog request and timers')
   })
 }
 

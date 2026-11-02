@@ -27,6 +27,8 @@ export interface SyncReport {
   ns?: string
   /** Terminal outcome. */
   status: SyncStatus
+  /** One-based attempt number within this host process. */
+  attempt?: number
   /** Stable machine-readable reason for a skip or failure. */
   reason?: string
   /** Entries returned by the endpoint. */
