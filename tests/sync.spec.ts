@@ -85,6 +85,7 @@ function harness(overrides: {
     fetchModels: overrides.fetchModels ?? vi.fn(async () => fetched),
     log,
     now: () => Date.parse('2026-11-02T00:00:00Z'),
+    sleep: vi.fn(async () => {}),
   }
   return { deps, config, mutate, log, resolve }
 }
@@ -179,17 +180,47 @@ describe('synchronize', () => {
       fetchModels: vi.fn(async () => { throw new Error('network down') }),
     })
     const report = await synchronize(deps, config)
-    expect(report).toMatchObject({ status: 'failed', reason: 'fetch-failed' })
+    expect(report).toMatchObject({ status: 'failed', reason: 'fetch-failed', detail: 'network down' })
     expect(mutate).not.toHaveBeenCalled()
     expect(deps.log.error).toHaveBeenCalled()
   })
 
-  it('reports a settings conflict without throwing', async () => {
+  it('re-reads the revision and retries a transient settings conflict', async () => {
+    const { deps, config } = harness()
+    let revision = 3
+    const revisions: Array<number | undefined> = []
+    deps.settings.describe = () => [descriptor(routeValue({
+      apiKeyEnv: 'OPENROUTER_API_KEY',
+      api: 'openai-completions',
+      models: [],
+    }), revision)]
+    deps.settings.mutate = vi.fn(async (_ns, _ops, expected) => {
+      revisions.push(expected)
+      if (revisions.length === 1) {
+        revision = 4
+        throw Object.assign(new Error('settings namespace "llm-pi-ai" changed since it was read'), {
+          code: 'SETTINGS_CONFLICT',
+        })
+      }
+    })
+
+    const report = await synchronize(deps, config)
+
+    expect(report).toMatchObject({ status: 'updated' })
+    expect(revisions).toEqual([3, 4])
+    expect(deps.log.warn).toHaveBeenCalled()
+  })
+
+  it('reports a persistent settings refusal with its detail', async () => {
     const { deps, config } = harness({
-      mutate: vi.fn(async () => { throw new Error('SETTINGS_CONFLICT') }),
+      mutate: vi.fn(async () => { throw new Error('validation exploded') }),
     })
     const report = await synchronize(deps, config)
-    expect(report).toMatchObject({ status: 'failed', reason: 'settings-write-failed' })
+    expect(report).toMatchObject({
+      status: 'failed',
+      reason: 'settings-write-failed',
+      detail: 'validation exploded',
+    })
   })
 })
 

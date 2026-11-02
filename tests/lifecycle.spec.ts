@@ -63,6 +63,7 @@ describe('startup retry policy', () => {
     for (const reason of ['provider-missing', 'settings-missing', 'route-missing']) {
       expect(shouldRetryStartup(report({ reason }))).toBe(true)
     }
+    expect(shouldRetryStartup(report({ status: 'failed', reason: 'settings-write-failed' }))).toBe(true)
     for (const reason of ['no-key', 'empty-result', 'model-overrides-present', 'invalid-models']) {
       expect(shouldRetryStartup(report({ reason }))).toBe(false)
     }

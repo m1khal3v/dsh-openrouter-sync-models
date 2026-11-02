@@ -47,6 +47,9 @@ const CREDENTIAL_DEBOUNCE_MS = 500
 /** Ignore duplicate credential events from the same operation. */
 const CREDENTIAL_COOLDOWN_MS = 5_000
 
+/** Let the loader finish the reload that exposed the target before writing. */
+const STARTUP_SETTLE_MS = 250
+
 /** Whether the provider and its settings descriptor are both ready. */
 export function targetReady(ctx: Pick<Context, 'llm' | 'settings'>, config: ResolvedConfig): boolean {
   const provider = ctx.llm.listConfigurableProviders().find(entry => entry.provider === config.provider)
@@ -74,8 +77,9 @@ async function waitForTarget(ctx: Context, config: ResolvedConfig, signal: Abort
   }
 }
 
-/** Whether a startup outcome is a transient ordering problem worth retrying. */
+/** Whether a startup outcome is worth another attempt shortly. */
 export function shouldRetryStartup(report: SyncReport | undefined): boolean {
+  if (report?.status === 'failed') return report.reason === 'settings-write-failed'
   if (report?.status !== 'skipped') return false
   return report.reason === 'provider-missing'
     || report.reason === 'settings-missing'
@@ -179,7 +183,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
     const bootstrap = async (): Promise<void> => {
       let first = true
-      for (const delay of STARTUP_RETRY_DELAYS) {
+      for (const [attemptIndex, delay] of STARTUP_RETRY_DELAYS.entries()) {
         if (lifetime.signal.aborted) return
         if (delay > 0) {
           await ctx.timeout(delay)
@@ -187,10 +191,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
         }
         if (first) {
           first = false
-          await waitForTarget(ctx, resolved, lifetime.signal)
+          const ready = await waitForTarget(ctx, resolved, lifetime.signal)
           if (lifetime.signal.aborted) return
+          if (ready) {
+            await ctx.timeout(STARTUP_SETTLE_MS)
+            if (lifetime.signal.aborted) return
+          }
         }
         const report = await runSync('startup')
+        if (report?.status === 'failed' && report.reason === 'settings-write-failed' && attemptIndex >= 1) return
         if (!shouldRetryStartup(report)) return
       }
     }

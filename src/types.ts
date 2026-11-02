@@ -31,6 +31,8 @@ export interface SyncReport {
   attempt?: number
   /** Stable machine-readable reason for a skip or failure. */
   reason?: string
+  /** Provider or settings error detail for a failure, when available. */
+  detail?: string
   /** Entries returned by the endpoint. */
   fetched?: number
   /** Entries kept after filtering. */

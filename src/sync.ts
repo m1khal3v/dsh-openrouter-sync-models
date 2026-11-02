@@ -16,6 +16,7 @@ import type { Logger } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
+import type { PiAiModelProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { SettingsDescriptor, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import type { ResolvedConfig } from './config.ts'
 import { selectModels } from './models.ts'
@@ -54,6 +55,8 @@ export interface SyncDeps {
   fetchModels: FetchModels
   log: Logger
   now?: () => number
+  /** Delay between write retries; injectable so tests stay fast. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /** Invocation context for one pass. */
@@ -116,6 +119,118 @@ function modelIds(models: readonly unknown[]): string[] {
   })
 }
 
+/** Read a message without trusting an unknown rejection value. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Delays between a fresh descriptor read and the settings write. */
+const WRITE_RETRY_DELAYS = [0, 250, 1_000] as const
+
+/**
+ * Whether a settings rejection is a reload race rather than a real refusal.
+ * HMR can replace the entry or bump its revision between the catalog fetch and
+ * the write; both cases are safe to retry with a freshly read descriptor.
+ */
+function isTransientWriteError(error: unknown): boolean {
+  const code = isRecord(error) && typeof error.code === 'string' ? error.code : undefined
+  if (code === 'SETTINGS_CONFLICT') return true
+  const message = errorMessage(error)
+  return /SETTINGS_CONFLICT|settings namespace .* changed|changed since it was read|No configurable plugin entry|no longer configurable/i.test(message)
+}
+
+/** Result of re-reading the route and attempting the write. */
+interface PersistResult {
+  status: 'updated' | 'unchanged' | 'skipped'
+  reason?: string
+  added: string[]
+  removed: string[]
+}
+
+/**
+ * Re-read the descriptor immediately before writing so a catalog fetch that
+ * overlapped an HMR recomposition cannot submit a stale revision. Transient
+ * reload races are retried; persistent failures are thrown to the caller so
+ * the status record can carry their message.
+ */
+async function persistSelection(
+  deps: SyncDeps,
+  config: ResolvedConfig,
+  provider: LlmConfigurableProvider,
+  models: readonly PiAiModelProfile[],
+  signal: AbortSignal | undefined,
+): Promise<PersistResult> {
+  const sleep = deps.sleep ?? (async (ms: number): Promise<void> => {
+    await new Promise(resolve => setTimeout(resolve, ms))
+  })
+
+  for (let attempt = 0; attempt < WRITE_RETRY_DELAYS.length; attempt += 1) {
+    const delay = WRITE_RETRY_DELAYS[attempt]!
+    if (delay > 0) await sleep(delay)
+    if (signal?.aborted) return { status: 'skipped', reason: 'aborted', added: [], removed: [] }
+
+    let descriptor: SettingsDescriptor | undefined
+    try {
+      descriptor = findDescriptor(deps, provider)
+    } catch (error) {
+      if (attempt < WRITE_RETRY_DELAYS.length - 1) continue
+      throw error
+    }
+    if (descriptor === undefined) {
+      if (attempt < WRITE_RETRY_DELAYS.length - 1) continue
+      return { status: 'skipped', reason: 'settings-missing', added: [], removed: [] }
+    }
+
+    const route = readPath(descriptor.value, provider.settingsPath)
+    if (!isRecord(route)) {
+      if (attempt < WRITE_RETRY_DELAYS.length - 1) continue
+      return { status: 'skipped', reason: 'route-missing', added: [], removed: [] }
+    }
+
+    const overrides = route.modelOverrides
+    if (isRecord(overrides) && Object.keys(overrides).length > 0) {
+      return { status: 'skipped', reason: 'model-overrides-present', added: [], removed: [] }
+    }
+
+    const currentModels = route.models === undefined ? [] : route.models
+    if (!Array.isArray(currentModels)) {
+      return { status: 'skipped', reason: 'invalid-models', added: [], removed: [] }
+    }
+
+    const beforeIds = modelIds(currentModels)
+    const afterIds = models.map(model => model.id)
+    const added = afterIds.filter(id => !beforeIds.includes(id))
+    const removed = beforeIds.filter(id => !afterIds.includes(id))
+
+    const apiNeedsUpdate = route.api !== config.api
+    const modelsNeedUpdate = !isDeepStrictEqual(currentModels, models)
+    if (!apiNeedsUpdate && !modelsNeedUpdate) {
+      return { status: 'unchanged', added, removed }
+    }
+
+    const ops: SettingsPathOp[] = []
+    if (apiNeedsUpdate) {
+      ops.push({ op: 'set', path: [...provider.settingsPath, 'api'], value: config.api })
+    }
+    if (modelsNeedUpdate) {
+      ops.push({ op: 'set', path: [...provider.settingsPath, 'models'], value: models })
+    }
+
+    try {
+      await deps.settings.mutate(provider.settingsNs, ops, descriptor.revision)
+      return { status: 'updated', added, removed }
+    } catch (error) {
+      if (attempt < WRITE_RETRY_DELAYS.length - 1 && isTransientWriteError(error)) {
+        deps.log.warn('settings write raced with a reload; retrying: %s', errorMessage(error))
+        continue
+      }
+      throw error
+    }
+  }
+
+  return { status: 'skipped', reason: 'settings-missing', added: [], removed: [] }
+}
+
 /**
  * Execute one synchronization.
  * @param deps - live directory, settings, credential, fetch, and logger seams.
@@ -169,8 +284,9 @@ export async function synchronize(
     try {
       apiKey = (await deps.credentials.resolve(credentialRef(keyRef)))?.value
     } catch (error) {
-      deps.log.error('could not resolve credential reference "%s": %s', keyRef, error instanceof Error ? error.message : String(error))
-      return { ...base, ns: provider.settingsNs, status: 'failed', reason: 'credential-error' }
+      const detail = errorMessage(error)
+      deps.log.error('could not resolve credential reference "%s": %s', keyRef, detail)
+      return { ...base, ns: provider.settingsNs, status: 'failed', reason: 'credential-error', detail }
     }
   }
 
@@ -188,8 +304,9 @@ export async function synchronize(
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
   } catch (error) {
-    deps.log.error('catalog request failed: %s', error instanceof Error ? error.message : String(error))
-    return { ...base, ns: provider.settingsNs, status: 'failed', reason: 'fetch-failed' }
+    const detail = errorMessage(error)
+    deps.log.error('catalog request failed: %s', detail)
+    return { ...base, ns: provider.settingsNs, status: 'failed', reason: 'fetch-failed', detail }
   }
 
   const selection = selectModels(fetched, config, nowMs)
@@ -206,57 +323,61 @@ export async function synchronize(
     }
   }
 
-  const beforeIds = modelIds(currentModels)
-  const afterIds = selection.models.map(model => model.id)
-  const added = afterIds.filter(id => !beforeIds.includes(id))
-  const removed = beforeIds.filter(id => !afterIds.includes(id))
+  try {
+    const persisted = await persistSelection(deps, config, provider, selection.models, options.signal)
+    if (persisted.status === 'skipped') {
+      deps.log.warn('catalog write skipped after the fetch: %s', persisted.reason ?? 'unknown')
+      return {
+        ...base,
+        ns: provider.settingsNs,
+        status: 'skipped',
+        reason: persisted.reason,
+        fetched: selection.fetched,
+        selected: selection.selected,
+        presets: selection.presets,
+      }
+    }
 
-  const apiNeedsUpdate = route.api !== config.api
-  const modelsNeedUpdate = !isDeepStrictEqual(currentModels, selection.models)
-  if (!apiNeedsUpdate && !modelsNeedUpdate) {
-    deps.log.debug('catalog is already current (%d models, %d presets)', selection.selected, selection.presets)
+    if (persisted.status === 'unchanged') {
+      deps.log.debug('catalog is already current (%d models, %d presets)', selection.selected, selection.presets)
+      return {
+        ...base,
+        ns: provider.settingsNs,
+        status: 'unchanged',
+        fetched: selection.fetched,
+        selected: selection.selected,
+        presets: selection.presets,
+      }
+    }
+
+    deps.log.info(
+      'synchronized provider "%s": %d models (%d presets), +%d -%d',
+      config.provider,
+      selection.selected,
+      selection.presets,
+      persisted.added.length,
+      persisted.removed.length,
+    )
+
     return {
       ...base,
       ns: provider.settingsNs,
-      status: 'unchanged',
+      status: 'updated',
       fetched: selection.fetched,
       selected: selection.selected,
       presets: selection.presets,
+      added: persisted.added,
+      removed: persisted.removed,
     }
-  }
-
-  const ops: SettingsPathOp[] = []
-  if (apiNeedsUpdate) {
-    ops.push({ op: 'set', path: [...provider.settingsPath, 'api'], value: config.api })
-  }
-  if (modelsNeedUpdate) {
-    ops.push({ op: 'set', path: [...provider.settingsPath, 'models'], value: selection.models })
-  }
-
-  try {
-    await deps.settings.mutate(provider.settingsNs, ops, descriptor.revision)
   } catch (error) {
-    deps.log.error('could not persist the OpenRouter catalog: %s', error instanceof Error ? error.message : String(error))
-    return { ...base, ns: provider.settingsNs, status: 'failed', reason: 'settings-write-failed' }
-  }
-
-  deps.log.info(
-    'synchronized provider "%s": %d models (%d presets), +%d -%d',
-    config.provider,
-    selection.selected,
-    selection.presets,
-    added.length,
-    removed.length,
-  )
-
-  return {
-    ...base,
-    ns: provider.settingsNs,
-    status: 'updated',
-    fetched: selection.fetched,
-    selected: selection.selected,
-    presets: selection.presets,
-    added,
-    removed,
+    const detail = errorMessage(error)
+    deps.log.error('could not persist the OpenRouter catalog: %s', detail)
+    return {
+      ...base,
+      ns: provider.settingsNs,
+      status: 'failed',
+      reason: 'settings-write-failed',
+      detail,
+    }
   }
 }
