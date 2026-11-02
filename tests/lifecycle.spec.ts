@@ -64,11 +64,11 @@ describe('startup retry policy', () => {
       expect(shouldRetryStartup(report({ reason }))).toBe(true)
     }
     expect(shouldRetryStartup(report({ status: 'failed', reason: 'settings-write-failed' }))).toBe(true)
+    expect(shouldRetryStartup(report({ status: 'failed', reason: 'fetch-failed' }))).toBe(true)
     for (const reason of ['no-key', 'empty-result', 'model-overrides-present', 'invalid-models']) {
       expect(shouldRetryStartup(report({ reason }))).toBe(false)
     }
     expect(shouldRetryStartup(report({ status: 'updated' }))).toBe(false)
-    expect(shouldRetryStartup(report({ status: 'failed', reason: 'fetch-failed' }))).toBe(false)
     expect(shouldRetryStartup(undefined)).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchOpenRouterModels, OpenRouterModelsError } from '../src/openrouter.ts'
+import { describeFetchError, fetchOpenRouterModels, OpenRouterModelsError } from '../src/openrouter.ts'
 
 /** Build a successful JSON response. */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -59,5 +59,16 @@ describe('fetchOpenRouterModels', () => {
       endpoint: 'https://openrouter.ai/api/v1/models',
       timeoutMs: 1_000,
     })).rejects.toBeInstanceOf(OpenRouterModelsError)
+  })
+
+  it('keeps the nested network cause in the failure detail', async () => {
+    const cause = Object.assign(new Error('getaddrinfo ENOTFOUND openrouter.ai'), { code: 'ENOTFOUND' })
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed', { cause }) }))
+
+    await expect(fetchOpenRouterModels({
+      endpoint: 'https://openrouter.ai/api/v1/models',
+      timeoutMs: 1_000,
+    })).rejects.toThrow(/fetch failed.*ENOTFOUND/)
+    expect(describeFetchError(new TypeError('fetch failed', { cause }))).toContain('ENOTFOUND')
   })
 })

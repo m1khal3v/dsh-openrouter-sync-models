@@ -49,8 +49,8 @@ const CREDENTIAL_DEBOUNCE_MS = 500
 /** Ignore duplicate credential events from the same operation. */
 const CREDENTIAL_COOLDOWN_MS = 5_000
 
-/** Let the loader finish the reload that exposed the target before writing. */
-const STARTUP_SETTLE_MS = 250
+/** Let the loader and its network/proxy plugins settle before the first request. */
+const STARTUP_SETTLE_MS = 1_000
 
 /** Whether the provider and its settings descriptor are both ready. */
 export function targetReady(ctx: Pick<Context, 'llm' | 'settings'>, config: ResolvedConfig): boolean {
@@ -81,7 +81,9 @@ async function waitForTarget(ctx: Context, config: ResolvedConfig, signal: Abort
 
 /** Whether a startup outcome is worth another attempt shortly. */
 export function shouldRetryStartup(report: SyncReport | undefined): boolean {
-  if (report?.status === 'failed') return report.reason === 'settings-write-failed'
+  if (report?.status === 'failed') {
+    return report.reason === 'settings-write-failed' || report.reason === 'fetch-failed'
+  }
   if (report?.status !== 'skipped') return false
   return report.reason === 'provider-missing'
     || report.reason === 'settings-missing'

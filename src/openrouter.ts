@@ -102,6 +102,34 @@ export class OpenRouterModelsError extends Error {
 }
 
 /**
+ * Flatten a network rejection and its causes into one diagnostic string.
+ * Node's `fetch` reports only `fetch failed`; the useful code
+ * (`ENOTFOUND`, `ECONNRESET`, `CERT_HAS_EXPIRED`, …) lives on `cause`.
+ * @param error - unknown rejection value.
+ * @returns the message/code chain, without repeating frames.
+ */
+export function describeFetchError(error: unknown): string {
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = error
+
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null && !seen.has(current); depth += 1) {
+    seen.add(current)
+    if (current instanceof Error) {
+      if (current.message.length > 0) parts.push(current.message)
+      const code = (current as { code?: unknown }).code
+      if (typeof code === 'string' && code.length > 0) parts.push(code)
+      current = (current as { cause?: unknown }).cause
+    } else {
+      parts.push(String(current))
+      break
+    }
+  }
+
+  return [...new Set(parts)].filter(part => part.length > 0).join(': ')
+}
+
+/**
  * Fetch the authenticated OpenRouter catalog.
  * @param options - endpoint, credential, timeout, and lifetime signal.
  * @returns the raw model list in endpoint order.
@@ -121,8 +149,7 @@ export async function fetchOpenRouterModels(options: FetchModelsOptions): Promis
   try {
     response = await fetch(options.endpoint, { headers, signal })
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new OpenRouterModelsError(`models request failed: ${detail}`)
+    throw new OpenRouterModelsError(`models request failed: ${describeFetchError(error)}`)
   }
 
   if (!response.ok) {

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-02
+
+### Fixed
+
+- Retry a transient `fetch failed` during the startup series instead of
+  sleeping until the next six-hour interval.
+- Record the nested network cause (`ENOTFOUND`, `ECONNRESET`, …) in the status
+  detail instead of only `fetch failed`.
+- Give the loader and its network/proxy plugins one second to settle before
+  the first catalog request.
+
 ## [0.1.6] - 2026-11-02
 
 ### Fixed

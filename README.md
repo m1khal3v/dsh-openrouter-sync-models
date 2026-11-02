@@ -187,7 +187,7 @@ DSH has no model-config field for OpenRouter `description`, pricing, benchmarks,
   - a change of the route's own OpenRouter credential;
   - the periodic pass six hours after the last completed attempt.
 - **No event storms.** HMR, settings, adapter, plugin-manager, and profile-reload events do not start a catalog request.
-- **Startup waits for both halves.** The first pass waits for the provider directory entry and the active `llm-pi-ai` settings descriptor, then retries briefly (`0 → 1 → 3 → 10 s`) if the loader is still settling. This prevents an install-time pass from skipping with `settings-missing` and sleeping until the next interval.
+- **Startup waits for both halves.** The first pass waits for the provider directory entry and the active `llm-pi-ai` settings descriptor, gives the loader and its network/proxy plugins one second to settle, then retries briefly (`0 → 1 → 3 → 10 s`) on target-ordering skips, settings-write races, or a transient `fetch failed`. This prevents an install-time pass from sleeping until the next interval.
 - **Credential pass** runs only when the exact route reference (`apiKeyEnv`, then the configured fallback) changes. Updates are debounced, and a change during a running pass queues at most one follow-up.
 - **Periodic pass** is rescheduled six hours after every completed attempt; it is never overlapped with another pass.
 - **Install/update writes survive HMR.** The first timer is created outside the HMR transaction's `AsyncLocalStorage` context, so the settings write queues behind the active reconciliation instead of failing with `HMR transactions cannot be nested`. The route and settings revision are then re-read after the catalog fetch, and a transient `SETTINGS_CONFLICT` or reload race is retried with the fresh revision before the pass is reported as failed.
@@ -211,7 +211,7 @@ Every attempt, including a skip, also writes its last terminal report to:
 $DSH_HOME/cache/openrouter-sync-models.json
 ```
 
-The record includes `at`, `trigger`, `attempt`, `status`, and `reason`, which answers “did the install-time pass run, and if not, why” even when the desktop build sends stdout to `/dev/null`. A failure also carries the provider or settings error message in `detail`.
+The record includes `at`, `trigger`, `attempt`, `status`, and `reason`, which answers “did the install-time pass run, and if not, why” even when the desktop build sends stdout to `/dev/null`. A failure also carries the provider or settings error message in `detail`; network failures include the nested cause (`ENOTFOUND`, `ECONNRESET`, `CERT_HAS_EXPIRED`, …) instead of a bare `fetch failed`.
 
 Model changes are also published as a live event:
 
