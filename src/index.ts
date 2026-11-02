@@ -41,11 +41,12 @@ const PROVIDER_POLL_MS = 250
  * slightly after this plugin activates.
  * @param ctx - context carrying the LLM directory.
  * @param config - resolved plugin configuration.
+ * @param signal - plugin lifetime cancellation.
  * @returns nothing; the caller checks the directory again before syncing.
  */
-async function waitForProvider(ctx: Context, config: ResolvedConfig): Promise<void> {
+async function waitForProvider(ctx: Context, config: ResolvedConfig, signal: AbortSignal): Promise<void> {
   const deadline = Date.now() + config.startupGraceMs
-  while (Date.now() < deadline) {
+  while (!signal.aborted && Date.now() < deadline) {
     if (ctx.llm.listConfigurableProviders().some(entry => entry.provider === config.provider)) return
     await ctx.timeout(PROVIDER_POLL_MS)
   }
@@ -79,7 +80,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           fetchModels: options => fetchOpenRouterModels({ ...options, signal: lifetime.signal }),
           log,
         }, resolved, { trigger, signal: lifetime.signal })
-        ctx.emit('openrouter/models-synced', report)
+        if (!lifetime.signal.aborted) ctx.emit('openrouter/models-synced', report)
       } catch (error) {
         // `synchronize` contains operational failures; this guard covers a
         // programming error or a disposed service and keeps the host alive.
@@ -91,7 +92,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
     const bootstrap = async (): Promise<void> => {
       try {
-        await waitForProvider(ctx, resolved)
+        await waitForProvider(ctx, resolved, lifetime.signal)
       } catch (error) {
         log.warn('provider discovery was interrupted: %s', error instanceof Error ? error.message : String(error))
       }
