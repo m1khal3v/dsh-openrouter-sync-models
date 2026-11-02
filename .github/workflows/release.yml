@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write   # OIDC token and npm provenance attestation
+  contents: read
+
+jobs:
+  publish:
+    name: Verify & Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: pnpm run verify
+
+      - name: Build
+        run: pnpm run build
+
+      # OIDC-only publish: npm authenticates the GitHub OIDC token through the
+      # package's trusted-publisher relationship; no static token is stored.
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks --provenance --access public
