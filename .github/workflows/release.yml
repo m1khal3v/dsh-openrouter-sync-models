@@ -38,7 +38,20 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Check published version
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "dsh-openrouter-sync-models@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "dsh-openrouter-sync-models@${VERSION} is already published"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "dsh-openrouter-sync-models@${VERSION} is not published yet"
+          fi
+
       # OIDC-only publish: npm authenticates the GitHub OIDC token through the
       # package's trusted-publisher relationship; no static token is stored.
       - name: Publish to npm
+        if: steps.published.outputs.already != 'true'
         run: pnpm publish --no-git-checks --provenance --access public
