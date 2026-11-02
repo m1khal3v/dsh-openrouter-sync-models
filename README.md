@@ -26,16 +26,25 @@
 ## 🛠 How It Works
 
 ```text
-┌──────────────────┐        GET /api/v1/models        ┌────────────────────────────┐
-│    OpenRouter    │ ◄─────────────────────────────── │  dsh-openrouter-sync-models │
-└──────────────────┘          Bearer token            └──────────────┬─────────────┘
-                                                                     │
-                                             ctx.settings.mutate()   │
-                                                                     ▼
-                                                   active profile cordis.patch.yml
-                                                                     │
-                                                                     ▼
-                                                          llm-pi-ai applies live
+OpenRouter              Sync Plugin               Settings (Patch)                llm-pi-ai
+    │                         │                           │                             │
+    │                         │ GET /api/v1/models        │                             │
+    │◄────────────────────────│ (resolves token)          │                             │
+    │ (Bearer token)          │                           │                             │
+    │                         │                           │                             │
+    │ JSON Catalog Array      │                           │                             │
+    │────────────────────────►│                           │                             │
+    │                         │ ctx.settings.mutate()     │                             │
+    │                         │──────────────────────────►│                             │
+    │                         │ (filtered & projected)    │                             │
+    │                         │                           │ DSH persists &              │
+    │                         │                           │ validates patch             │
+    │                         │                           │─────────────────┐           │
+    │                         │                           │                 │           │
+    │                         │                           │◄────────────────┘           │
+    │                         │                           │                             │
+    │                         │                           │ Applies live via HMR        │
+    │                         │                           │────────────────────────────►│
 ```
 
 1. The plugin finds the `openrouter` route through `ctx.llm.listConfigurableProviders()`.
@@ -55,6 +64,22 @@ No restart is needed for model updates.
 ```sh
 dsh plugin --profile <profile> add dsh-openrouter-sync-models
 ```
+
+`<profile>` is the profile directory name under `$DSH_HOME/profiles/<name>`. Install the plugin into every profile you actually boot.
+
+| `<profile>` | What it runs | How to install |
+|---|---|---|
+| `web` | Shipped browser surface, booted by `dsh web` or `dsh --profile web` | `dsh plugin --profile web add dsh-openrouter-sync-models` |
+| `headless` | Shipped one-shot CLI, booted by `dsh --profile headless "job"` | `dsh plugin --profile headless add dsh-openrouter-sync-models` |
+| `sdk` | Shipped SDK host over JSON-RPC stdio | `dsh plugin --profile sdk add dsh-openrouter-sync-models` |
+| `sdk-minimal` | Shipped minimal SDK agent tree | `dsh plugin --profile sdk-minimal add dsh-openrouter-sync-models` |
+| `acp` | Shipped ACP stdio host | `dsh plugin --profile acp add dsh-openrouter-sync-models` |
+| `desktop` | Electron-owned desktop profile | Use the app's **Plugins** page, or the desktop-installed `dsh` command. The npm CLI rejects plugin management for `desktop`. |
+| `<name>` (custom) | Any other profile directory | Initialize it with `dsh --profile <name> --from-default-profile web` (or another shipped template), then install the plugin into it. |
+
+The shipped `web`, `headless`, `sdk`, `sdk-minimal`, and `acp` profiles initialize automatically on first use. A custom profile name is just a directory under `$DSH_HOME/profiles/`, so the same plugin can be installed independently into several profiles.
+
+If a profile omits the `settings` or `credentials` services, the plugin still loads but leaves synchronization inactive.
 
 Or from a local checkout:
 
