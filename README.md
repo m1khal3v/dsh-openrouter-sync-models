@@ -190,6 +190,7 @@ DSH has no model-config field for OpenRouter `description`, pricing, benchmarks,
 - **Startup waits for both halves.** The first pass waits for the provider directory entry and the active `llm-pi-ai` settings descriptor, then retries briefly (`0 → 1 → 3 → 10 s`) if the loader is still settling. This prevents an install-time pass from skipping with `settings-missing` and sleeping until the next interval.
 - **Credential pass** runs only when the exact route reference (`apiKeyEnv`, then the configured fallback) changes. Updates are debounced, and a change during a running pass queues at most one follow-up.
 - **Periodic pass** is rescheduled six hours after every completed attempt; it is never overlapped with another pass.
+- **Install/update writes survive HMR.** The route and settings revision are re-read after the catalog fetch, and a transient `SETTINGS_CONFLICT` or reload race is retried with the fresh revision before the pass is reported as failed.
 - **Empty results are never written.** Network errors, 401/403, empty catalogs, revision conflicts, and validation failures leave the profile untouched.
 - **`modelOverrides` is respected.** If the route uses `modelOverrides`, the plugin skips it because DSH refuses `models` beside `modelOverrides`.
 - **Route ownership matters.** The route should come from the profile patch or a layer beneath it. A higher-priority home or command-line patch blocks the write; the plugin reports the failure without changing anything.
@@ -210,7 +211,7 @@ Every attempt, including a skip, also writes its last terminal report to:
 $DSH_HOME/cache/openrouter-sync-models.json
 ```
 
-The record includes `at`, `trigger`, `attempt`, `status`, and `reason`, which answers “did the install-time pass run, and if not, why” even when the desktop build sends stdout to `/dev/null`.
+The record includes `at`, `trigger`, `attempt`, `status`, and `reason`, which answers “did the install-time pass run, and if not, why” even when the desktop build sends stdout to `/dev/null`. A failure also carries the provider or settings error message in `detail`.
 
 Model changes are also published as a live event:
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-02
+
+### Fixed
+
+- Re-read the provider route and settings revision after the catalog fetch, so
+  an HMR recomposition during install/update no longer makes the write fail
+  with a stale revision.
+- Retry transient settings conflicts and reload races with the fresh revision.
+- Retry the startup pass when it fails at the settings write.
+
+### Added
+
+- Failure detail in the last-attempt record at
+  `$DSH_HOME/cache/openrouter-sync-models.json`.
+
 ## [0.1.4] - 2026-11-02
 
 ### Fixed
