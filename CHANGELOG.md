@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-02
+
+### Fixed
+
+- Schedule startup, periodic, and credential timers outside the HMR
+  transaction's `AsyncLocalStorage` context. An install/update pass now queues
+  its settings write behind the active reconciliation instead of failing with
+  `HMR transactions cannot be nested`.
+- Fall back to the public `plugin-manager/changed` event when that internal HMR
+  scope cannot be escaped.
+
 ## [0.1.5] - 2026-11-02
 
 ### Fixed

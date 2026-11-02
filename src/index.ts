@@ -21,8 +21,10 @@
 
 import type { Context, Logger } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-timer'
+import type {} from '@deepseek-ai/dsh-plugin-manager'
 import type { Config as PluginConfig, ResolvedConfig } from './config.ts'
 import { resolveConfig } from './config.ts'
+import { runOutsideHmr } from './hmr-context.ts'
 import { fetchOpenRouterModels } from './openrouter.ts'
 import { writeStatus } from './status.ts'
 import { currentKeyRef, synchronize } from './sync.ts'
@@ -115,10 +117,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
         periodicDispose = undefined
       }
       if (lifetime.signal.aborted) return
-      periodicDispose = ctx.timeout(() => {
-        periodicDispose = undefined
-        void runSync('interval')
-      }, intervalMs)
+      const scheduled = runOutsideHmr(ctx, () => {
+        periodicDispose = ctx.timeout(() => {
+          periodicDispose = undefined
+          void runSync('interval')
+        }, intervalMs)
+      })
+      if (!scheduled) log.warn('HMR transaction scope cannot be escaped; periodic sync is not scheduled')
     }
 
     const doSync = async (trigger: SyncTrigger, attemptNo: number): Promise<SyncReport | undefined> => {
@@ -209,21 +214,44 @@ export function apply(ctx: Context, config: PluginConfig): void {
         credentialDebounceDispose()
         credentialDebounceDispose = undefined
       }
-      credentialDebounceDispose = ctx.timeout(() => {
-        credentialDebounceDispose = undefined
-        if (lifetime.signal.aborted) return
-        const now = Date.now()
-        if (now - lastCredentialStartedAt < CREDENTIAL_COOLDOWN_MS) return
-        lastCredentialStartedAt = now
-        if (running) {
-          pendingCredential = true
-          return
-        }
-        void runSync('credential')
-      }, CREDENTIAL_DEBOUNCE_MS)
+      const scheduled = runOutsideHmr(ctx, () => {
+        credentialDebounceDispose = ctx.timeout(() => {
+          credentialDebounceDispose = undefined
+          if (lifetime.signal.aborted) return
+          const now = Date.now()
+          if (now - lastCredentialStartedAt < CREDENTIAL_COOLDOWN_MS) return
+          lastCredentialStartedAt = now
+          if (running) {
+            pendingCredential = true
+            return
+          }
+          void runSync('credential')
+        }, CREDENTIAL_DEBOUNCE_MS)
+      })
+      if (!scheduled) log.warn('HMR transaction scope cannot be escaped; credential sync is not scheduled')
     }
 
-    ctx.timeout(() => void bootstrap(), 0)
+    const scheduleBootstrap = (): void => {
+      const scheduled = runOutsideHmr(ctx, () => {
+        ctx.timeout(() => void bootstrap(), 0)
+      })
+      if (scheduled) return
+
+      // Public fallback for hosts whose HMR scope cannot be escaped: the
+      // plugin-manager event is emitted after the install/update transaction
+      // has completed, so its listener runs in a clean async context.
+      let fired = false
+      let dispose: (() => void) | undefined
+      dispose = ctx.on('plugin-manager/changed', () => {
+        if (fired) return
+        fired = true
+        dispose?.()
+        void bootstrap()
+      })
+      log.warn('HMR transaction scope cannot be escaped; waiting for plugin-manager completion before the first sync')
+    }
+
+    scheduleBootstrap()
 
     ctx.on('credentials/reference-updated', (ref) => {
       if (lifetime.signal.aborted) return
