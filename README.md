@@ -1,30 +1,62 @@
-# dsh-openrouter-sync-models
+<p align="center">
+  <a href="https://www.npmjs.com/package/dsh-openrouter-sync-models"><img alt="npm" src="https://img.shields.io/npm/v/dsh-openrouter-sync-models?style=flat-square&color=4b6fff"></a>
+  <img alt="DeepSeek Harness" src="https://img.shields.io/badge/deepseek--harness-v0.2.1--rc.5-263146?style=flat-square">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-263146?style=flat-square"></a>
+</p>
 
-Keep the DeepSeek Harness `llm-pi-ai` OpenRouter model list synchronized with the live OpenRouter catalog — including the account-specific `@preset/...` models that OpenRouter returns only for an authenticated request.
+<h1 align="center">dsh-openrouter-sync-models</h1>
+<p align="center">
+  <b>An always-current OpenRouter model catalog for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>.</b><br>
+  Keeps the <code>llm-pi-ai</code> OpenRouter route in sync at startup, every six hours, and whenever your key changes — including account-only <code>@preset/...</code> models.
+</p>
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) bundle plugin. Host-only: no client half, no React, no CSS.
+---
 
-## Why
+## ⚡️ Highlights
 
-OpenRouter retires models, adds new ones, and lets an account define custom presets. A hand-written `models:` list goes stale, and a public catalog request cannot see the presets at all. This plugin refreshes the list at startup, every six hours, and whenever the route's credential changes.
+- 🔐 **Authenticated catalog** — uses your OpenRouter token, so custom presets and account-specific models are included, not just the public list.
+- 🧩 **One plugin, every surface** — desktop, web, and CLI. It discovers the route through `ctx.llm` and writes through `ctx.settings`, with no profile paths or build-mode branches.
+- 🧼 **Zero YAML surgery** — no regex, no `DSH_HOME`, no `DSH_PROFILE`, no backups or status files. DSH owns atomic writes, revision checks, and HMR.
+- 🎛 **Useful by default** — tool-capable, text-output, chat-reachable models only. Presets on, paid and free models both included.
+- 🧠 **Detail-aware mapping** — capacities, input modalities, reasoning efforts, and evidenced compatibility flags are projected into the model profiles.
+- 📡 **Observable** — structured `ctx.logger` diagnostics plus a live `openrouter/models-synced` event.
 
-The plugin does not know whether it runs in the desktop app, the web surface, or the CLI. It discovers the OpenRouter route through `ctx.llm.listConfigurableProviders()` and writes through `ctx.settings.mutate()`, so the active profile patch, revision checks, atomic replacement, and HMR reconciliation are handled by DSH.
+---
 
-## Requirements
+## 🛠 How It Works
 
-- DSH `>=0.2.1-rc.5 <0.3.0`
-- Node `^22.19 || >=24`
-- An `llm-pi-ai` route named `openrouter` with a credential reference such as `OPENROUTER_API_KEY`
+```text
+┌──────────────────┐        GET /api/v1/models        ┌────────────────────────────┐
+│    OpenRouter    │ ◄─────────────────────────────── │  dsh-openrouter-sync-models │
+└──────────────────┘          Bearer token            └──────────────┬─────────────┘
+                                                                     │
+                                             ctx.settings.mutate()   │
+                                                                     ▼
+                                                   active profile cordis.patch.yml
+                                                                     │
+                                                                     ▼
+                                                          llm-pi-ai applies live
+```
 
-The catalog endpoint is public, but the authenticated response is the one that carries account presets. The plugin therefore requires the key by default and never falls back to the anonymous catalog on its own, which would silently delete every preset.
+1. The plugin finds the `openrouter` route through `ctx.llm.listConfigurableProviders()`.
+2. It resolves the route's `apiKeyEnv` through `ctx.credentials` and requests the authenticated catalog.
+3. The response is filtered and projected into DSH model profiles.
+4. Only `api` and `models` are written, through `ctx.settings.mutate()`.
+5. DSH persists the active profile patch, validates the result, and applies it live through HMR.
 
-## Install
+No restart is needed for model updates.
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install the plugin
 
 ```sh
 dsh plugin --profile <profile> add dsh-openrouter-sync-models
 ```
 
-Or install a local checkout:
+Or from a local checkout:
 
 ```sh
 pnpm install
@@ -32,13 +64,9 @@ pnpm run build
 dsh plugin --profile <profile> add file:~/projects/mine/dsh-openrouter-sync-models
 ```
 
-Enabling the bundle mounts the plugin. HMR applies configuration writes live; a restart is not needed for model updates.
+### 2. Configure the OpenRouter route
 
-The route must be owned by the profile patch (or inherited from a bundle beneath it). If the route is supplied by a higher-priority home or command-line patch, DSH refuses the settings write and the plugin reports a failure without touching anything.
-
-## Route configuration
-
-The plugin only writes `api` and `models` on the selected route. Everything else stays user-owned:
+The plugin only writes `api` and `models`; the route itself stays user-owned:
 
 ```yaml
 - id: llm-pi-ai
@@ -50,19 +78,25 @@ The plugin only writes `api` and `models` on the selected route. Everything else
         # api and models are maintained by dsh-openrouter-sync-models
 ```
 
-A route with `modelOverrides` is skipped: `models` replaces the installed catalog, and DSH refuses a profile that combines both.
+### 3. Provide the key
 
-## Configuration
+Store `OPENROUTER_API_KEY` through the harness credential store, the environment, or the profile's credential layer.
 
-Every field is optional. Defaults are:
+The catalog endpoint is public, but the authenticated response is the one that contains `@preset/...` models. Without a key the plugin skips the pass by default rather than deleting every preset.
 
-| Key | Default | Meaning |
+---
+
+## ⚙️ Configuration
+
+Every field is optional.
+
+| Key | Default | Description |
 |---|---|---|
 | `provider` | `openrouter` | `llm-pi-ai` provider route to synchronize |
 | `endpoint` | `https://openrouter.ai/api/v1/models` | Catalog endpoint |
 | `api` | `openai-completions` | Route-level wire protocol written beside the list |
 | `apiKeyEnv` | `OPENROUTER_API_KEY` | Credential reference used when the route names none |
-| `requireKey` | `true` | Refuse to sync when the credential cannot be resolved |
+| `requireKey` | `true` | Skip when the credential cannot be resolved |
 | `includePresets` | `true` | Include account-specific `@preset/...` models |
 | `freeOnly` | `false` | Keep only zero-priced models |
 | `requireTools` | `true` | Keep only models advertising tool calling |
@@ -89,7 +123,9 @@ Example override:
 
 With the defaults, a 2026-11-02 authenticated sample of 416 catalog entries yields roughly 305 models, including account presets. Set `freeOnly: true` to reproduce the old free-only behavior.
 
-## What gets mapped
+---
+
+## 🧬 What Gets Mapped
 
 OpenRouter fields are projected into the subset DSH can actually serve:
 
@@ -117,24 +153,28 @@ Compatibility switches are only declared when evidenced:
 
 DSH has no model-config field for OpenRouter `description`, pricing, benchmarks, `default_parameters`, voices, links, or `alias_target`, so those are intentionally not projected.
 
-## Behavior and failure policy
+---
 
-- First sync runs once the provider directory exposes `openrouter`.
-- Subsequent syncs run every `intervalHours`; an in-flight pass is never overlapped.
-- A credential update for the route's reference triggers an immediate pass, so changing accounts refreshes presets without a restart.
-- Network errors, 401/403, empty results, revision conflicts, and settings validation failures leave the profile untouched and emit a `failed` or `skipped` report.
-- An empty filtered list is never written.
-- Removed models are reported in the log and in the `openrouter/models-synced` event.
+## 🧠 Behavior & Good to Know
 
-Do not run the older `dsh-openrouter-sync` plugin at the same time: both target the same `models` list.
+- **First pass** runs once the provider directory exposes `openrouter`.
+- **Periodic pass** runs every `intervalHours`; an in-flight pass is never overlapped.
+- **Credential pass** runs immediately when the route's credential reference changes, so switching accounts refreshes presets without a restart.
+- **Empty results are never written.** Network errors, 401/403, empty catalogs, revision conflicts, and validation failures leave the profile untouched.
+- **`modelOverrides` is respected.** If the route uses `modelOverrides`, the plugin skips it because DSH refuses `models` beside `modelOverrides`.
+- **Route ownership matters.** The route should come from the profile patch or a layer beneath it. A higher-priority home or command-line patch blocks the write; the plugin reports the failure without changing anything.
+- **Do not run `dsh-openrouter-sync` beside this plugin.** Both target the same `models` list.
+- **OpenRouter OAuth:** the synchronizer resolves `apiKeyEnv`. A route authenticated only through pi-ai's OAuth record has no environment reference; configure `apiKeyEnv` for catalog synchronization even if inference signs in interactively.
 
-### OpenRouter OAuth
+### Observability
 
-The synchronizer resolves `apiKeyEnv` through `ctx.credentials`. A route authenticated only through pi-ai's OAuth credential record has no environment reference; configure `apiKeyEnv` for catalog synchronization even if inference signs in interactively.
+Logs go through:
 
-## Observability
+```ts
+ctx.logger('openrouter-sync-models')
+```
 
-The plugin logs through `ctx.logger('openrouter-sync-models')`. It also emits:
+Model changes are also published as a live event:
 
 ```ts
 ctx.on('openrouter/models-synced', report => {
@@ -144,9 +184,11 @@ ctx.on('openrouter/models-synced', report => {
 })
 ```
 
-The event is live-only and never enters the session log.
+The event never enters the session log.
 
-## Development
+---
+
+## 🧑‍💻 Development
 
 ```sh
 pnpm install
@@ -154,12 +196,10 @@ pnpm run verify    # typecheck + tests
 pnpm run build
 ```
 
-`lib/` is generated by `tsdown`; declarations come from `tsc -p tsconfig.types.json`. The package publishes through GitHub Actions on `v*` tags with npm provenance.
+`lib/` is generated by `tsdown`; declarations come from `tsc -p tsconfig.types.json`.
 
-Before the first release tag, configure the package's npm **Trusted Publisher** for the
-`m1khal3v/dsh-openrouter-sync-models` repository and the `release.yml` workflow.
-The workflow uses OIDC (`id-token: write`) and stores no npm token.
+The package publishes through GitHub Actions on `v*` tags with npm provenance. Before the first release tag, configure the package's npm **Trusted Publisher** for the `m1khal3v/dsh-openrouter-sync-models` repository and the `release.yml` workflow. The workflow uses OIDC and stores no npm token.
 
-## License
+## 📄 License
 
-MIT — see [LICENSE](./LICENSE).
+[MIT](LICENSE)
