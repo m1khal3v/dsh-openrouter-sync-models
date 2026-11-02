@@ -1,0 +1,8 @@
+# dsh-openrouter-sync-models — bundle patch layer.
+#
+# Inserts one host plugin that keeps the `llm-pi-ai` OpenRouter model list in
+# sync with the authenticated OpenRouter catalog. The route itself (apiKeyEnv,
+# baseURL, displayName) stays user-owned; only `api` and `models` are written.
+- insert:
+    - id: openrouter-sync-models
+      name: dsh-openrouter-sync-models
