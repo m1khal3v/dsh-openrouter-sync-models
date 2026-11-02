@@ -182,9 +182,14 @@ DSH has no model-config field for OpenRouter `description`, pricing, benchmarks,
 
 ## 🧠 Behavior & Good to Know
 
-- **First pass** runs once the provider directory exposes `openrouter`.
-- **Periodic pass** runs every `intervalHours`; an in-flight pass is never overlapped.
-- **Credential pass** runs immediately when the route's credential reference changes, so switching accounts refreshes presets without a restart.
+- **Strict refresh policy.** Within one host process the catalog refreshes on exactly three triggers:
+  - the startup pass;
+  - a change of the route's own OpenRouter credential;
+  - the periodic pass six hours after the last completed attempt.
+- **No event storms.** HMR, settings, adapter, plugin-manager, and profile-reload events do not start a catalog request.
+- **Startup waits for both halves.** The first pass waits for the provider directory entry and the active `llm-pi-ai` settings descriptor, then retries briefly (`0 → 1 → 3 → 10 s`) if the loader is still settling. This prevents an install-time pass from skipping with `settings-missing` and sleeping until the next interval.
+- **Credential pass** runs only when the exact route reference (`apiKeyEnv`, then the configured fallback) changes. Updates are debounced, and a change during a running pass queues at most one follow-up.
+- **Periodic pass** is rescheduled six hours after every completed attempt; it is never overlapped with another pass.
 - **Empty results are never written.** Network errors, 401/403, empty catalogs, revision conflicts, and validation failures leave the profile untouched.
 - **`modelOverrides` is respected.** If the route uses `modelOverrides`, the plugin skips it because DSH refuses `models` beside `modelOverrides`.
 - **Route ownership matters.** The route should come from the profile patch or a layer beneath it. A higher-priority home or command-line patch blocks the write; the plugin reports the failure without changing anything.
@@ -198,6 +203,14 @@ Logs go through:
 ```ts
 ctx.logger('openrouter-sync-models')
 ```
+
+Every attempt, including a skip, also writes its last terminal report to:
+
+```text
+$DSH_HOME/cache/openrouter-sync-models.json
+```
+
+The record includes `at`, `trigger`, `attempt`, `status`, and `reason`, which answers “did the install-time pass run, and if not, why” even when the desktop build sends stdout to `/dev/null`.
 
 Model changes are also published as a live event:
 

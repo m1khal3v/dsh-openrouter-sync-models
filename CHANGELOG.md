@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-02
+
+### Fixed
+
+- A first sync during install/reload waits for both the provider directory and
+  the active `llm-pi-ai` settings descriptor, then retries briefly instead of
+  skipping until the six-hour interval.
+- Refresh triggers are now strictly limited to the startup pass, a change of
+  the route's own OpenRouter credential, and the periodic pass.
+
+### Added
+
+- A durable last-attempt record at
+  `$DSH_HOME/cache/openrouter-sync-models.json` with trigger, attempt, status,
+  and skip/failure reason.
+
 ## [0.1.3] - 2026-11-02
 
 ### Changed
